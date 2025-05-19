@@ -607,8 +607,10 @@ impl PowerStationTdpLimitManager {
     const DBUS_SERVICE_NAME: &str = "org.shadowblip.PowerStation";
     const DBUS_BASE_PATH: &str = "/org/shadowblip/Performance/GPU";
     const DBUS_CARD_PREFIX: &str = "card";
-    const DBUS_GPU_INTERFACE: &str = "org.shadowblip.GPU.Card";
+    const DBUS_GPU_INTERFACE: &str = "org.shadowblip.GPU";
+    const DBUS_GPU_CARD_INTERFACE: &str = "org.shadowblip.GPU.Card";
     const DBUS_TDP_INTERFACE: &str = "org.shadowblip.GPU.Card.TDP";
+    const DBUS_INTERFACE_PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 
     // Find appropriate GPU card path from PowerStation DBus service
     // Uses cached path if available, otherwise performs lookup
@@ -661,7 +663,7 @@ impl PowerStationTdpLimitManager {
             connection,
             Self::DBUS_SERVICE_NAME,
             path,
-            "org.shadowblip.GPU",
+            Self::DBUS_GPU_INTERFACE,
         )
         .await?;
 
@@ -702,13 +704,13 @@ impl PowerStationTdpLimitManager {
                 connection,
                 Self::DBUS_SERVICE_NAME,
                 path,
-                "org.freedesktop.DBus.Properties",
+                Self::DBUS_INTERFACE_PROPERTIES,
             )
             .await?;
 
             // Get the Class property
             let class = proxy
-                .call::<_, _, OwnedValue>("Get", &(Self::DBUS_GPU_INTERFACE, "Class"))
+                .call::<_, _, OwnedValue>("Get", &(Self::DBUS_GPU_CARD_INTERFACE, "Class"))
                 .await
                 .inspect_err(|message| error!("Error calling Get: {message}"))?;
 
@@ -729,8 +731,14 @@ impl PowerStationTdpLimitManager {
     }
 
     // Set the TDP boost property
-    async fn set_tdp_boost(&self, boost: u32) -> Result<()> {
-        debug!("Setting PowerStation TDP boost to {boost}");
+    // Helper method to set any TDP-related property on PowerStation
+    async fn set_tdp_property(
+        &self,
+        interface: &str,
+        property_name: &str,
+        value: u32,
+    ) -> Result<()> {
+        debug!("Setting PowerStation TDP property {property_name} to {value}");
 
         // Connect to system DBus
         let connection = Connection::system().await?;
@@ -738,25 +746,25 @@ impl PowerStationTdpLimitManager {
         // Find the GPU card path
         let card_path = self.find_gpu_card_path().await?;
 
-        // Get a proxy to set the TDP boost property
+        // Get a proxy to set the property
         let path = ObjectPath::try_from(card_path.as_str())?;
         let proxy = zbus::Proxy::new(
             &connection,
             Self::DBUS_SERVICE_NAME,
             path,
-            "org.freedesktop.DBus.Properties",
+            Self::DBUS_INTERFACE_PROPERTIES,
         )
         .await
         .inspect_err(|message| error!("Error creating proxy: {message}"))?;
 
-        // Set the TDP boost property (convert u32 to double)
+        // Set the property (convert u32 to double)
         proxy
             .call::<_, _, ()>(
                 "Set",
                 &(
-                    Self::DBUS_TDP_INTERFACE,
-                    "Boost",
-                    zbus::zvariant::Value::from(boost as f64),
+                    interface,
+                    property_name,
+                    zbus::zvariant::Value::from(value as f64),
                 ),
             )
             .await
@@ -766,7 +774,7 @@ impl PowerStationTdpLimitManager {
     }
 
     // Helper method to get property values from D-Bus
-    async fn get_tdp_property_value(&self, property_name: &str, interface: &str) -> Result<f64> {
+    async fn get_tdp_property(&self, property_name: &str, interface: &str) -> Result<f64> {
         // Connect to system DBus
         let connection = Connection::system().await?;
 
@@ -782,7 +790,7 @@ impl PowerStationTdpLimitManager {
             &connection,
             Self::DBUS_SERVICE_NAME,
             path,
-            "org.freedesktop.DBus.Properties",
+            Self::DBUS_INTERFACE_PROPERTIES,
         )
         .await
         .inspect_err(|message| error!("Error creating proxy: {message}"))?;
@@ -800,24 +808,29 @@ impl PowerStationTdpLimitManager {
 
     async fn get_min_tdp(&self) -> Result<u32> {
         let min_tdp = self
-            .get_tdp_property_value("MinTdp", Self::DBUS_TDP_INTERFACE)
+            .get_tdp_property("MinTdp", Self::DBUS_TDP_INTERFACE)
             .await?;
         Ok(min_tdp.round() as u32)
     }
 
     async fn get_max_tdp(&self) -> Result<u32> {
         let max_tdp = self
-            .get_tdp_property_value("MaxTdp", Self::DBUS_TDP_INTERFACE)
+            .get_tdp_property("MaxTdp", Self::DBUS_TDP_INTERFACE)
             .await?;
         Ok(max_tdp.round() as u32)
     }
 
-    async fn get_max_boost(&self) -> Result<u32> {
-        let max_boost = self
-            .get_tdp_property_value("MaxBoost", Self::DBUS_TDP_INTERFACE)
-            .await?;
-        Ok(max_boost.round() as u32)
-    }
+    // async fn get_max_boost(&self) -> Result<u32> {
+    //     let max_boost = self
+    //         .get_tdp_property("MaxBoost", Self::DBUS_TDP_INTERFACE)
+    //         .await?;
+    //     Ok(max_boost.round() as u32)
+    // }
+
+    // async fn set_tdp_boost(&self, boost: u32) -> Result<()> {
+    //     self.set_tdp_property(Self::DBUS_TDP_INTERFACE, "Boost", boost)
+    //         .await
+    // }
 }
 
 #[async_trait]
@@ -825,7 +838,7 @@ impl TdpLimitManager for PowerStationTdpLimitManager {
     async fn get_tdp_limit(&self) -> Result<u32> {
         debug!("Getting PowerStation TDP limit");
         let tdp_value = self
-            .get_tdp_property_value("TDP", Self::DBUS_TDP_INTERFACE)
+            .get_tdp_property("TDP", Self::DBUS_TDP_INTERFACE)
             .await?;
         Ok(tdp_value.round() as u32)
     }
@@ -841,37 +854,9 @@ impl TdpLimitManager for PowerStationTdpLimitManager {
             range
         );
 
-        // Connect to system DBus
-        let connection = Connection::system().await?;
-
-        // Find the GPU card path
-        let card_path = self.find_gpu_card_path().await?;
-
-        // Get a proxy to set the TDP property
-        let path = ObjectPath::try_from(card_path.as_str())?;
-        let proxy = zbus::Proxy::new(
-            &connection,
-            Self::DBUS_SERVICE_NAME,
-            path,
-            "org.freedesktop.DBus.Properties",
-        )
-        .await
-        .inspect_err(|message| error!("Error creating proxy: {message}"))?;
-
-        // Set the TDP property (convert u32 to double)
-        proxy
-            .call::<_, _, ()>(
-                "Set",
-                &(
-                    Self::DBUS_TDP_INTERFACE,
-                    "TDP",
-                    zbus::zvariant::Value::from(limit as f64),
-                ),
-            )
+        // Use the common method to set the TDP property
+        self.set_tdp_property(Self::DBUS_TDP_INTERFACE, "TDP", limit)
             .await
-            .inspect_err(|message| error!("Error calling Set: {message}"))?;
-
-        Ok(())
     }
 
     // Implementation of the required get_tdp_limit_range method
