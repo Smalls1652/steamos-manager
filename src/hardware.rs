@@ -136,18 +136,24 @@ impl DeviceConfig {
     fn is_wildcard_pattern(pattern: &str) -> bool {
         pattern.contains('*') || pattern.contains('?')
     }
-    
+
     /// Check if single device entry is exact match (no wildcards)
     fn is_exact_device_match(device: &DeviceMatch) -> bool {
         if let Some(dmi) = &device.dmi {
-            !Self::is_wildcard_pattern(&dmi.sys_vendor) &&
-            !dmi.board_name.as_ref().map_or(false, |s| Self::is_wildcard_pattern(s)) &&
-            !dmi.product_name.as_ref().map_or(false, |s| Self::is_wildcard_pattern(s))
+            !Self::is_wildcard_pattern(&dmi.sys_vendor)
+                && !dmi
+                    .board_name
+                    .as_ref()
+                    .map_or(false, |s| Self::is_wildcard_pattern(s))
+                && !dmi
+                    .product_name
+                    .as_ref()
+                    .map_or(false, |s| Self::is_wildcard_pattern(s))
         } else {
             false
         }
     }
-    
+
     /// Use glob for wildcard matching
     fn dmi_glob_match(pattern: &str, text: &str) -> bool {
         match Pattern::new(pattern) {
@@ -171,63 +177,95 @@ impl DeviceConfig {
         let product_name = read_to_string(path(PRODUCT_NAME_PATH)).await?;
         let product_name = product_name.trim_end();
 
-        tracing::info!("DMI Info - sys_vendor: '{}', board_name: '{}', product_name: '{}'", 
-            sys_vendor, board_name, product_name);
+        tracing::info!(
+            "DMI Info - sys_vendor: '{}', board_name: '{}', product_name: '{}'",
+            sys_vendor,
+            board_name,
+            product_name
+        );
 
         // Phase 1: Exact matching takes priority
         for device in self.device.iter() {
             if Self::is_exact_device_match(device) {
                 if let Some(dmi) = &device.dmi {
-                    tracing::debug!("Testing exact match for device: {} ({})", device.device, device.variant);
-                    
+                    tracing::debug!(
+                        "Testing exact match for device: {} ({})",
+                        device.device,
+                        device.variant
+                    );
+
                     if dmi.sys_vendor != sys_vendor {
                         continue;
                     }
                     if let Some(ref board) = dmi.board_name {
                         if board == board_name {
-                            tracing::info!("Exact match found: {} ({}) via board_name", device.device, device.variant);
+                            tracing::info!(
+                                "Exact match found: {} ({}) via board_name",
+                                device.device,
+                                device.variant
+                            );
                             return Ok(Some(device));
                         }
                     }
                     if let Some(ref product) = dmi.product_name {
                         if product == product_name {
-                            tracing::info!("Exact match found: {} ({}) via product_name", device.device, device.variant);
+                            tracing::info!(
+                                "Exact match found: {} ({}) via product_name",
+                                device.device,
+                                device.variant
+                            );
                             return Ok(Some(device));
                         }
                     }
                 }
             }
         }
-        
+
         // Phase 2: Wildcard matching
         for device in self.device.iter() {
             if !Self::is_exact_device_match(device) {
                 if let Some(dmi) = &device.dmi {
-                    tracing::debug!("Testing wildcard match for device: {} ({})", device.device, device.variant);
-                    
+                    tracing::debug!(
+                        "Testing wildcard match for device: {} ({})",
+                        device.device,
+                        device.variant
+                    );
+
                     if !Self::dmi_glob_match(&dmi.sys_vendor, sys_vendor) {
                         continue;
                     }
                     if let Some(ref board) = dmi.board_name {
                         if Self::dmi_glob_match(board, board_name) {
-                            tracing::info!("Wildcard match found: {} ({}) via board_name pattern '{}'", 
-                                device.device, device.variant, board);
+                            tracing::info!(
+                                "Wildcard match found: {} ({}) via board_name pattern '{}'",
+                                device.device,
+                                device.variant,
+                                board
+                            );
                             return Ok(Some(device));
                         }
                     }
                     if let Some(ref product) = dmi.product_name {
                         if Self::dmi_glob_match(product, product_name) {
-                            tracing::info!("Wildcard match found: {} ({}) via product_name pattern '{}'", 
-                                device.device, device.variant, product);
+                            tracing::info!(
+                                "Wildcard match found: {} ({}) via product_name pattern '{}'",
+                                device.device,
+                                device.variant,
+                                product
+                            );
                             return Ok(Some(device));
                         }
                     }
                 }
             }
         }
-        
-        tracing::warn!("No device match found for sys_vendor='{}', board_name='{}', product_name='{}'", 
-            sys_vendor, board_name, product_name);
+
+        tracing::warn!(
+            "No device match found for sys_vendor='{}', board_name='{}', product_name='{}'",
+            sys_vendor,
+            board_name,
+            product_name
+        );
         Ok(None)
     }
 
@@ -632,7 +670,10 @@ pub mod test {
 
     #[tokio::test]
     async fn test_glob_matching() {
-        assert!(DeviceConfig::dmi_glob_match("ASUS*", "ASUSTeK COMPUTER INC."));
+        assert!(DeviceConfig::dmi_glob_match(
+            "ASUS*",
+            "ASUSTeK COMPUTER INC."
+        ));
         assert!(DeviceConfig::dmi_glob_match("ASUS*", "ASUS"));
         assert!(!DeviceConfig::dmi_glob_match("ASUS*", "Valve"));
         assert!(DeviceConfig::dmi_glob_match("*", "anything"));
