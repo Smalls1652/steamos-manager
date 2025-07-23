@@ -35,7 +35,7 @@ use crate::{path, write_synced};
 
 const HWMON_PREFIX: &str = "/sys/class/hwmon";
 
-const GPU_HWMON_NAME: &str = "amdgpu";
+const AMDGPU_HWMON_NAME: &str = "amdgpu";
 
 const CPU_PREFIX: &str = "/sys/devices/system/cpu/cpufreq";
 
@@ -124,12 +124,12 @@ pub enum CPUBoostState {
 #[derive(Display, EnumString, VariantNames, PartialEq, Debug, Clone)]
 #[strum(serialize_all = "snake_case")]
 pub enum TdpLimitingMethod {
-    GpuHwmon,
+    AmdgpuHwmon,
     FirmwareAttribute,
 }
 
 #[derive(Debug)]
-pub(crate) struct GpuHwmonTdpLimitManager {}
+pub(crate) struct AmdgpuHwmonTdpLimitManager {}
 
 #[derive(Debug)]
 pub(crate) struct FirmwareAttributeLimitManager {
@@ -164,7 +164,7 @@ pub(crate) async fn tdp_limit_manager() -> Result<Box<dyn TdpLimitManager>> {
                 performance_profile: firmware_attribute.performance_profile.clone(),
             })
         }
-        TdpLimitingMethod::GpuHwmon => Box::new(GpuHwmonTdpLimitManager {}),
+        TdpLimitingMethod::AmdgpuHwmon => Box::new(AmdgpuHwmonTdpLimitManager {}),
     })
 }
 
@@ -267,14 +267,14 @@ impl Service for SysfsWriterService {
 
 async fn read_gpu_sysfs_contents<S: AsRef<Path>>(suffix: S) -> Result<String> {
     // Read a given suffix for the GPU
-    let base = find_hwmon(GPU_HWMON_NAME).await?;
+    let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
     fs::read_to_string(base.join(suffix.as_ref()))
         .await
         .map_err(|message| anyhow!("Error opening sysfs file for reading {message}"))
 }
 
 async fn write_gpu_sysfs_contents<S: AsRef<Path>>(suffix: S, data: &[u8]) -> Result<()> {
-    let base = find_hwmon(GPU_HWMON_NAME).await?;
+    let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
     write_synced(base.join(suffix), data)
         .await
         .inspect_err(|message| error!("Error writing to sysfs file: {message}"))
@@ -392,7 +392,7 @@ pub(crate) async fn set_gpu_power_profile(value: GPUPowerProfile) -> Result<()> 
 }
 
 pub(crate) async fn get_available_gpu_performance_levels() -> Result<Vec<GPUPerformanceLevel>> {
-    let base = find_hwmon(GPU_HWMON_NAME).await?;
+    let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
     if try_exists(base.join(GPU_PERFORMANCE_LEVEL_SUFFIX)).await? {
         Ok(vec![
             GPUPerformanceLevel::Auto,
@@ -505,7 +505,7 @@ pub(crate) async fn get_gpu_clocks_range() -> Result<RangeInclusive<u32>> {
 pub(crate) async fn set_gpu_clocks(clocks: u32) -> Result<()> {
     // Set GPU clocks to given value valid
     // Only used when GPU Performance Level is manual, but write whenever called.
-    let base = find_hwmon(GPU_HWMON_NAME).await?;
+    let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
     let mut myfile = File::create(base.join(GPU_CLOCKS_SUFFIX))
         .await
         .inspect_err(|message| error!("Error opening sysfs file for writing: {message}"))?;
@@ -534,7 +534,7 @@ pub(crate) async fn set_gpu_clocks(clocks: u32) -> Result<()> {
 }
 
 pub(crate) async fn get_gpu_clocks() -> Result<u32> {
-    let base = find_hwmon(GPU_HWMON_NAME).await?;
+    let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
     let clocks_file = File::open(base.join(GPU_CLOCKS_SUFFIX)).await?;
     let mut reader = BufReader::new(clocks_file);
     loop {
@@ -587,9 +587,9 @@ async fn find_platform_profile(name: &str) -> Result<PathBuf> {
 }
 
 #[async_trait]
-impl TdpLimitManager for GpuHwmonTdpLimitManager {
+impl TdpLimitManager for AmdgpuHwmonTdpLimitManager {
     async fn get_tdp_limit(&self) -> Result<u32> {
-        let base = find_hwmon(GPU_HWMON_NAME).await?;
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
         let power1cap = fs::read_to_string(base.join(TDP_LIMIT1)).await?;
         let power1cap: u32 = power1cap.trim_end().parse()?;
         Ok(power1cap / 1_000_000)
@@ -603,7 +603,7 @@ impl TdpLimitManager for GpuHwmonTdpLimitManager {
 
         let data = format!("{limit}000000");
 
-        let base = find_hwmon(GPU_HWMON_NAME).await?;
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
         write_synced(base.join(TDP_LIMIT1), data.as_bytes())
             .await
             .inspect_err(|message| {
@@ -1012,7 +1012,7 @@ pub(crate) mod test {
         // Creates hwmon path, including device subpath
         create_dir_all(filename.parent().unwrap()).await?;
         // Writes name file as addgpu so find_hwmon() will find it.
-        write_synced(base.join("name"), GPU_HWMON_NAME.as_bytes()).await?;
+        write_synced(base.join("name"), AMDGPU_HWMON_NAME.as_bytes()).await?;
         Ok(())
     }
 
@@ -1022,7 +1022,7 @@ pub(crate) mod test {
         create_dir_all(&base).await?;
         write(base.join("boost"), b"1\n").await?;
 
-        let base = find_hwmon(GPU_HWMON_NAME).await?;
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await?;
 
         let filename = base.join(GPU_PERFORMANCE_LEVEL_SUFFIX);
         write(filename.as_path(), "auto\n").await?;
@@ -1056,7 +1056,7 @@ pub(crate) mod test {
     }
 
     pub async fn write_clocks(mhz: u32) {
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_CLOCKS_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1078,7 +1078,7 @@ CCLK_RANGE in Core0:
     }
 
     pub async fn read_clocks() -> Result<String, std::io::Error> {
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         read_to_string(base.join(GPU_CLOCKS_SUFFIX)).await
     }
 
@@ -1091,7 +1091,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_PERFORMANCE_LEVEL_SUFFIX);
         assert!(get_gpu_performance_level().await.is_err());
 
@@ -1136,7 +1136,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_PERFORMANCE_LEVEL_SUFFIX);
 
         set_gpu_performance_level(GPUPerformanceLevel::Auto)
@@ -1182,7 +1182,7 @@ CCLK_RANGE in Core0:
 
         let mut config = DeviceConfig::default();
         config.tdp_limit = Some(TdpLimitConfig {
-            method: TdpLimitingMethod::GpuHwmon,
+            method: TdpLimitingMethod::AmdgpuHwmon,
             range: Some(RangeConfig { min: 3, max: 15 }),
             download_mode_limit: None,
             firmware_attribute: None,
@@ -1207,7 +1207,7 @@ CCLK_RANGE in Core0:
 
         let mut config = DeviceConfig::default();
         config.tdp_limit = Some(TdpLimitConfig {
-            method: TdpLimitingMethod::GpuHwmon,
+            method: TdpLimitingMethod::AmdgpuHwmon,
             range: Some(RangeConfig { min: 3, max: 15 }),
             download_mode_limit: None,
             firmware_attribute: None,
@@ -1276,7 +1276,7 @@ CCLK_RANGE in Core0:
         assert!(get_gpu_clocks().await.is_err());
         setup().await.expect("setup");
 
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_CLOCKS_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1309,7 +1309,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_CLOCK_LEVELS_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1402,7 +1402,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_POWER_PROFILE_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1458,7 +1458,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_POWER_PROFILE_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1516,7 +1516,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_POWER_PROFILE_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1554,7 +1554,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_POWER_PROFILE_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1586,7 +1586,7 @@ CCLK_RANGE in Core0:
         let _h = testing::start();
 
         setup().await.expect("setup");
-        let base = find_hwmon(GPU_HWMON_NAME).await.unwrap();
+        let base = find_hwmon(AMDGPU_HWMON_NAME).await.unwrap();
         let filename = base.join(GPU_POWER_PROFILE_SUFFIX);
         create_dir_all(filename.parent().unwrap())
             .await
@@ -1837,7 +1837,7 @@ CCLK_RANGE in Core0:
 
         let mut config = DeviceConfig::default();
         config.tdp_limit = Some(TdpLimitConfig {
-            method: TdpLimitingMethod::GpuHwmon,
+            method: TdpLimitingMethod::AmdgpuHwmon,
             range: Some(RangeConfig { min: 3, max: 15 }),
             download_mode_limit: NonZeroU32::new(6),
             firmware_attribute: None,
@@ -1933,7 +1933,7 @@ CCLK_RANGE in Core0:
 
         let mut config = DeviceConfig::default();
         config.tdp_limit = Some(TdpLimitConfig {
-            method: TdpLimitingMethod::GpuHwmon,
+            method: TdpLimitingMethod::AmdgpuHwmon,
             range: Some(RangeConfig { min: 3, max: 15 }),
             download_mode_limit: None,
             firmware_attribute: None,
