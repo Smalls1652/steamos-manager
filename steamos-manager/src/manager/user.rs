@@ -12,7 +12,7 @@ use tokio::fs::try_exists;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
-use tracing::error;
+use tracing::{error, warn};
 use zbus::object_server::SignalEmitter;
 use zbus::proxy::{Builder, CacheProperties};
 use zbus::zvariant::Fd;
@@ -22,6 +22,10 @@ use crate::cec::{HdmiCecControl, HdmiCecState};
 use crate::daemon::user::Command;
 use crate::daemon::DaemonCommand;
 use crate::error::{to_zbus_error, to_zbus_fdo_error, zbus_to_zbus_fdo};
+use crate::gpu::{
+    gpu_performance_level_driver, gpu_power_profile_driver, GpuPerformanceLevelDriver,
+    GpuPowerProfileDriver,
+};
 use crate::hardware::{
     device_config, device_type, device_variant, steam_deck_variant, SteamDeckVariant,
 };
@@ -29,10 +33,8 @@ use crate::job::JobManagerCommand;
 use crate::path;
 use crate::platform::platform_config;
 use crate::power::{
-    get_available_cpu_scaling_governors, get_available_gpu_performance_levels,
-    get_available_gpu_power_profiles, get_available_platform_profiles, get_cpu_boost_state,
-    get_cpu_scaling_governor, get_gpu_clocks, get_gpu_clocks_range, get_gpu_performance_level,
-    get_gpu_power_profile, get_max_charge_level, get_platform_profile, TdpManagerCommand,
+    get_available_cpu_scaling_governors, get_available_platform_profiles, get_cpu_boost_state,
+    get_cpu_scaling_governor, get_max_charge_level, get_platform_profile, TdpManagerCommand,
 };
 use crate::screenreader::{OrcaManager, ScreenReaderAction, ScreenReaderMode};
 use crate::wifi::{
@@ -133,10 +135,12 @@ struct FanControl1 {
 
 struct GpuPerformanceLevel1 {
     proxy: Proxy<'static>,
+    driver: Box<dyn GpuPerformanceLevelDriver>,
 }
 
 struct GpuPowerProfile1 {
     proxy: Proxy<'static>,
+    driver: Box<dyn GpuPowerProfileDriver>,
 }
 
 pub(crate) struct TdpLimit1 {
@@ -391,7 +395,8 @@ impl FanControl1 {
 impl GpuPerformanceLevel1 {
     #[zbus(property(emits_changed_signal = "const"))]
     async fn available_gpu_performance_levels(&self) -> fdo::Result<Vec<String>> {
-        get_available_gpu_performance_levels()
+        self.driver
+            .get_available_performance_levels()
             .await
             .inspect_err(|message| error!("Error getting GPU performance levels: {message}"))
             .map(|levels| levels.into_iter().map(|level| level.to_string()).collect())
@@ -400,7 +405,7 @@ impl GpuPerformanceLevel1 {
 
     #[zbus(property)]
     async fn gpu_performance_level(&self) -> fdo::Result<String> {
-        match get_gpu_performance_level().await {
+        match self.driver.get_performance_level().await {
             Ok(level) => Ok(level.to_string()),
             Err(e) => {
                 error!("Error getting GPU performance level: {e}");
@@ -421,7 +426,8 @@ impl GpuPerformanceLevel1 {
 
     #[zbus(property)]
     async fn manual_gpu_clock(&self) -> fdo::Result<u32> {
-        get_gpu_clocks()
+        self.driver
+            .get_clocks()
             .await
             .inspect_err(|message| error!("Error getting manual GPU clock: {message}"))
             .map_err(to_zbus_fdo_error)
@@ -439,7 +445,9 @@ impl GpuPerformanceLevel1 {
 
     #[zbus(property(emits_changed_signal = "const"))]
     async fn manual_gpu_clock_min(&self) -> fdo::Result<u32> {
-        Ok(*get_gpu_clocks_range()
+        Ok(*self
+            .driver
+            .get_clocks_range()
             .await
             .map_err(to_zbus_fdo_error)?
             .start())
@@ -447,7 +455,9 @@ impl GpuPerformanceLevel1 {
 
     #[zbus(property(emits_changed_signal = "const"))]
     async fn manual_gpu_clock_max(&self) -> fdo::Result<u32> {
-        Ok(*get_gpu_clocks_range()
+        Ok(*self
+            .driver
+            .get_clocks_range()
             .await
             .map_err(to_zbus_fdo_error)?
             .end())
@@ -458,7 +468,9 @@ impl GpuPerformanceLevel1 {
 impl GpuPowerProfile1 {
     #[zbus(property(emits_changed_signal = "const"))]
     async fn available_gpu_power_profiles(&self) -> fdo::Result<Vec<String>> {
-        let (_, names): (Vec<u32>, Vec<String>) = get_available_gpu_power_profiles()
+        let (_, names): (Vec<u32>, Vec<String>) = self
+            .driver
+            .get_available_power_profiles()
             .await
             .map_err(to_zbus_fdo_error)?
             .into_iter()
@@ -468,7 +480,7 @@ impl GpuPowerProfile1 {
 
     #[zbus(property)]
     async fn gpu_power_profile(&self) -> fdo::Result<String> {
-        match get_gpu_power_profile().await {
+        match self.driver.get_power_profile().await {
             Ok(profile) => Ok(profile.to_string()),
             Err(e) => {
                 error!("Error getting GPU power profile: {e}");
@@ -1131,12 +1143,6 @@ pub(crate) async fn create_interfaces(
     let cpu_scaling = CpuScaling1 {
         proxy: proxy.clone(),
     };
-    let gpu_performance_level = GpuPerformanceLevel1 {
-        proxy: proxy.clone(),
-    };
-    let gpu_power_profile = GpuPowerProfile1 {
-        proxy: proxy.clone(),
-    };
     let hdmi_cec = HdmiCec1::new(&session).await?;
     let manager2 = Manager2 {
         proxy: proxy.clone(),
@@ -1177,22 +1183,34 @@ pub(crate) async fn create_interfaces(
 
     object_server.at(MANAGER_PATH, cpu_scaling).await?;
 
-    if !get_available_gpu_performance_levels()
-        .await
-        .unwrap_or_default()
-        .is_empty()
-    {
-        object_server
-            .at(MANAGER_PATH, gpu_performance_level)
-            .await?;
+    match gpu_performance_level_driver().await {
+        Ok(driver) => {
+            object_server
+                .at(
+                    MANAGER_PATH,
+                    GpuPerformanceLevel1 {
+                        proxy: proxy.clone(),
+                        driver,
+                    },
+                )
+                .await?;
+        }
+        Err(e) => warn!("Can't add GpuPerformanceLevel1 interface: {e}"),
     }
 
-    if !get_available_gpu_power_profiles()
-        .await
-        .unwrap_or_default()
-        .is_empty()
-    {
-        object_server.at(MANAGER_PATH, gpu_power_profile).await?;
+    match gpu_power_profile_driver().await {
+        Ok(driver) => {
+            object_server
+                .at(
+                    MANAGER_PATH,
+                    GpuPowerProfile1 {
+                        proxy: proxy.clone(),
+                        driver,
+                    },
+                )
+                .await?;
+        }
+        Err(e) => warn!("Can't add GpuPowerProfile1 interface: {e}"),
     }
 
     if hdmi_cec.hdmi_cec.get_enabled_state().await.is_ok() {
@@ -1229,7 +1247,7 @@ mod test {
     };
     use crate::power::TdpLimitingMethod;
     use crate::systemd::test::{MockManager, MockUnit};
-    use crate::{path, power, testing};
+    use crate::{path, testing};
 
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt;
@@ -1272,7 +1290,7 @@ mod test {
                 variant: String::from("Galileo"),
             }],
             tdp_limit: Some(TdpLimitConfig {
-                method: TdpLimitingMethod::GpuHwmon,
+                method: TdpLimitingMethod::AmdgpuHwmon,
                 range: Some(RangeConfig::new(3, 15)),
                 download_mode_limit: NonZeroU32::new(6),
                 firmware_attribute: None,
@@ -1350,7 +1368,8 @@ mod test {
             .test
             .process_cb
             .set(|_, _| Ok((0, String::from("Interface wlan0"))));
-        power::test::create_nodes().await?;
+        crate::gpu::test::create_nodes().await?;
+        crate::power::test::create_nodes().await?;
         create_interfaces(
             connection.clone(),
             connection.clone(),
