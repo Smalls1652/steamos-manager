@@ -16,6 +16,9 @@ dmi.product_name = "Claw 8 AI+ A2VM"
 device = "claw8_a2vm"
 variant = "Claw 8 AI+ A2VM"
 
+[gpu_performance]
+driver = "intelgpu"
+
 [performance_profile]
 platform_profile_name = "msi-wmi-platform"
 suggested_default = "balanced-performance"
