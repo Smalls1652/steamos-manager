@@ -12,13 +12,13 @@ use regex::Regex;
 use serde::Deserialize;
 use std::fmt::Display;
 use std::ops::RangeInclusive;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use strum::{Display, EnumString, VariantNames};
 use tokio::fs::{self, try_exists, File};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::hardware::{device_config, device_type};
 use crate::power::find_hwmon;
@@ -58,6 +58,7 @@ pub enum AmdgpuPowerProfile {
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub enum GpuPerformanceLevel {
     Amdgpu(AmdgpuPerformanceLevel),
+    Intelgpu(IntelPerformanceLevel),
 }
 
 #[derive(Display, EnumString, PartialEq, Debug, Copy, Clone)]
@@ -68,6 +69,13 @@ pub enum AmdgpuPerformanceLevel {
     High,
     Manual,
     ProfilePeak,
+}
+
+#[derive(Display, EnumString, PartialEq, Debug, Copy, Clone)]
+#[strum(serialize_all = "snake_case")]
+pub enum IntelPerformanceLevel {
+    Auto,
+    Manual,
 }
 
 #[derive(Deserialize, Display, EnumString, VariantNames, PartialEq, Debug, Clone)]
@@ -82,6 +90,7 @@ pub enum GpuPowerProfileDriverType {
 #[serde(rename_all = "snake_case")]
 pub enum GpuPerformanceLevelDriverType {
     Amdgpu,
+    Intelgpu,
 }
 
 #[derive(Debug)]
@@ -89,6 +98,36 @@ pub(crate) struct AmdgpuPowerProfileDriver {}
 
 #[derive(Debug)]
 pub(crate) struct AmdgpuPerformanceLevelDriver {}
+
+#[derive(Debug)]
+pub(crate) struct IntelGpuPerformanceLevelDriver {
+    card_path: PathBuf,
+    config: IntelGpuConfig,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IntelGpuConfig {
+    min_freq: &'static str,
+    max_freq: &'static str,
+    range_min: &'static str,
+    range_max: &'static str,
+}
+
+impl IntelGpuConfig {
+    const I915: Self = Self {
+        min_freq: "gt_min_freq_mhz",
+        max_freq: "gt_max_freq_mhz",
+        range_min: "gt_RPn_freq_mhz",
+        range_max: "gt_RP0_freq_mhz",
+    };
+
+    const XE: Self = Self {
+        min_freq: "device/tile0/gt0/freq0/min_freq",
+        max_freq: "device/tile0/gt0/freq0/max_freq",
+        range_min: "device/tile0/gt0/freq0/rpn_freq",
+        range_max: "device/tile0/gt0/freq0/rp0_freq",
+    };
+}
 
 #[async_trait]
 pub(crate) trait GpuPowerProfileDriver: Send + Sync {
@@ -122,15 +161,39 @@ pub(crate) async fn gpu_power_profile_driver() -> Result<Box<dyn GpuPowerProfile
     })
 }
 
+async fn detect_gpu_type() -> Result<GpuPerformanceLevelDriverType> {
+    if find_hwmon(AMDGPU_HWMON_NAME).await.is_ok() {
+        debug!("Auto-detected AMD GPU");
+        return Ok(GpuPerformanceLevelDriverType::Amdgpu);
+    }
+
+    if IntelGpuPerformanceLevelDriver::detect_gpu_info()
+        .await
+        .is_ok()
+    {
+        debug!("Auto-detected Intel GPU");
+        return Ok(GpuPerformanceLevelDriverType::Intelgpu);
+    }
+
+    bail!("No supported GPU detected automatically")
+}
+
 pub(crate) async fn gpu_performance_level_driver() -> Result<Box<dyn GpuPerformanceLevelDriver>> {
     let config = device_config().await?;
-    let config = config
-        .as_ref()
-        .and_then(|config| config.gpu_performance.as_ref())
-        .ok_or(anyhow!("No GPU power profile driver configured"))?;
 
-    Ok(match &config.driver {
+    let driver_type =
+        if let Some(gpu_config) = config.as_ref().and_then(|c| c.gpu_performance.as_ref()) {
+            gpu_config.driver.clone()
+        } else {
+            debug!("No GPU performance config found, auto-detecting GPU type");
+            detect_gpu_type().await?
+        };
+
+    Ok(match driver_type {
         GpuPerformanceLevelDriverType::Amdgpu => Box::new(AmdgpuPerformanceLevelDriver {}),
+        GpuPerformanceLevelDriverType::Intelgpu => {
+            Box::new(IntelGpuPerformanceLevelDriver::new().await?)
+        }
     })
 }
 
@@ -138,6 +201,7 @@ impl Display for GpuPerformanceLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             GpuPerformanceLevel::Amdgpu(v) => write!(f, "{v}"),
+            GpuPerformanceLevel::Intelgpu(v) => write!(f, "{v}"),
         }
     }
 }
@@ -386,6 +450,149 @@ impl GpuPerformanceLevelDriver for AmdgpuPerformanceLevelDriver {
             return Ok(mhz.parse()?);
         }
         Ok(0)
+    }
+}
+
+impl IntelGpuPerformanceLevelDriver {
+    /// Creates a new Intel GPU driver by detecting available hardware
+    pub async fn new() -> Result<Self> {
+        let (card_path, config) = Self::detect_gpu_info().await?;
+        Ok(Self { card_path, config })
+    }
+
+    /// Detects available Intel GPU info, similar to find_hwmon for AMD
+    async fn detect_gpu_info() -> Result<(PathBuf, IntelGpuConfig)> {
+        for card_num in 0..4 {
+            let card_path = PathBuf::from(format!("/sys/class/drm/card{}", card_num));
+            if !try_exists(&card_path).await? {
+                continue;
+            }
+            if try_exists(card_path.join(IntelGpuConfig::I915.min_freq)).await? {
+                debug!("Found Intel i915 GPU at {}", card_path.display());
+                return Ok((card_path, IntelGpuConfig::I915));
+            }
+            if try_exists(card_path.join(IntelGpuConfig::XE.min_freq)).await? {
+                debug!("Found Intel Xe GPU at {}", card_path.display());
+                return Ok((card_path, IntelGpuConfig::XE));
+            }
+        }
+        bail!("No valid Intel GPU found");
+    }
+
+    async fn read_freq(&self, freq_path: &str) -> Result<u32> {
+        let path = self.card_path.join(freq_path);
+        let val_str = fs::read_to_string(&path).await.map_err(|e| {
+            anyhow!(
+                "Failed to read intel gpu frequency from {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        val_str.trim().parse::<u32>().map_err(|e| {
+            anyhow!(
+                "Failed to parse intel gpu frequency '{}': {e}",
+                val_str.trim()
+            )
+        })
+    }
+
+    async fn write_freq(&self, freq_path: &str, clocks: u32) -> Result<()> {
+        let path = self.card_path.join(freq_path);
+        write_synced(path, clocks.to_string().as_bytes()).await
+    }
+
+    async fn get_min_clocks(&self) -> Result<u32> {
+        self.read_freq(self.config.min_freq).await
+    }
+
+    async fn set_min_clocks(&self, clocks: u32) -> Result<()> {
+        self.write_freq(self.config.min_freq, clocks).await
+    }
+
+    async fn get_max_clocks(&self) -> Result<u32> {
+        self.read_freq(self.config.max_freq).await
+    }
+
+    async fn set_max_clocks(&self, clocks: u32) -> Result<()> {
+        self.write_freq(self.config.max_freq, clocks).await
+    }
+}
+
+#[async_trait]
+impl GpuPerformanceLevelDriver for IntelGpuPerformanceLevelDriver {
+    fn performance_level_from_str(&self, value: &str) -> Result<GpuPerformanceLevel> {
+        Ok(GpuPerformanceLevel::Intelgpu(
+            IntelPerformanceLevel::from_str(value)?,
+        ))
+    }
+
+    async fn get_available_performance_levels(&self) -> Result<Vec<GpuPerformanceLevel>> {
+        Ok(vec![
+            GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Auto),
+            GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Manual),
+        ])
+    }
+
+    async fn get_performance_level(&self) -> Result<GpuPerformanceLevel> {
+        let range = self.get_clocks_range().await?;
+        let min_clock = self.get_min_clocks().await?;
+        let max_clock = self.get_max_clocks().await?;
+
+        // If min same as range start and max same as range end, consider it Auto mode
+        if min_clock == *range.start() && max_clock == *range.end() {
+            Ok(GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Auto))
+        } else {
+            Ok(GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Manual))
+        }
+    }
+
+    async fn set_performance_level(&self, level: GpuPerformanceLevel) -> Result<()> {
+        match level {
+            GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Auto) => {
+                // Auto mode: reset min/max to hardware range for dynamic frequency adjustment
+                let range = self.get_clocks_range().await?;
+                let min = *range.start();
+                let max = *range.end();
+
+                // Set min and max frequencies to hardware limits
+                self.set_min_clocks(min).await?;
+                self.set_max_clocks(max).await
+            }
+            GpuPerformanceLevel::Intelgpu(IntelPerformanceLevel::Manual) => {
+                // Manual mode: do nothing, user will set specific frequency later
+                Ok(())
+            }
+            _ => {
+                // Other modes not supported
+                bail!("Intel GPU only supports Auto and Manual performance levels")
+            }
+        }
+    }
+
+    async fn get_clocks_range(&self) -> Result<RangeInclusive<u32>> {
+        if let Some(range) = device_config()
+            .await?
+            .as_ref()
+            .and_then(|config| config.gpu_performance.as_ref())
+            .and_then(|config| config.clocks)
+        {
+            return Ok(range.min..=range.max);
+        }
+
+        let min_val = self.read_freq(self.config.range_min).await?;
+        let max_val = self.read_freq(self.config.range_max).await?;
+
+        Ok(min_val..=max_val)
+    }
+
+    async fn get_clocks(&self) -> Result<u32> {
+        self.get_min_clocks().await
+    }
+
+    async fn set_clocks(&self, clocks: u32) -> Result<()> {
+        // For Intel, we set both min and max to the same value to force the frequency
+        self.set_min_clocks(clocks).await?;
+        self.set_max_clocks(clocks).await
     }
 }
 
