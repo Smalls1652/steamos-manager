@@ -863,6 +863,40 @@ pub mod test {
     }
 
     #[tokio::test]
+    async fn test_legion_go_exact_match_priority_over_wildcard_across_files() {
+        let _h = setup_board(
+            "LENOVO\n", 
+            "INVALID\n", 
+            "83E1\n"
+        ).await.unwrap();
+
+        // This test verifies that Legion Go config from legion-go-series.toml takes priority over generic config
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match exact config from legion-go-series.toml instead of generic
+        // This proves cross-config exact matching priority works for Legion Go
+        assert_eq!(device, "legion_go");
+        assert_eq!(variant, "83E1");
+    }
+
+    #[tokio::test]
+    async fn test_legion_go_2_exact_match_priority_over_wildcard_across_files() {
+        let _h = setup_board(
+            "LENOVO\n", 
+            "INVALID\n", 
+            "83N0\n"
+        ).await.unwrap();
+
+        // This test verifies that Legion Go 2 config from legion-go-series.toml takes priority over generic config
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match exact config from legion-go-series.toml instead of generic
+        // This proves cross-config exact matching priority works for Legion Go 2
+        assert_eq!(device, "legion_go_2");
+        assert_eq!(variant, "83N0");
+    }
+
+    #[tokio::test]
     async fn test_fallback_to_wildcard_when_no_exact_match() {
         let _h = setup_board(
             "Unknown Vendor\n",
@@ -877,6 +911,102 @@ pub mod test {
         
         // Should fallback to wildcard matching when no exact match exists
         // Should match generic.toml since no other config will match "Unknown Vendor"
+        assert_eq!(device, "generic");
+        assert_eq!(variant, "Generic");
+    }
+
+    #[tokio::test]
+    async fn test_gpd_generic_wildcard_match() {
+        let _h = setup_board(
+            "GPD\n",
+            "WIN4\n",
+            "G1619-04\n"
+        ).await.unwrap();
+
+        // Test GPD device matching via wildcard in generic.toml
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match GPD generic config from generic.toml
+        assert_eq!(device, "gpd_generic");
+        assert_eq!(variant, "GPD_Generic");
+    }
+
+    #[tokio::test]
+    async fn test_gpd_win_max_2_wildcard_match() {
+        let _h = setup_board(
+            "GPD\n",
+            "G1617-01\n",
+            "WIN Max 2\n"
+        ).await.unwrap();
+
+        // Test another GPD device matching via wildcard in generic.toml
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match GPD generic config from generic.toml
+        assert_eq!(device, "gpd_generic");
+        assert_eq!(variant, "GPD_Generic");
+    }
+
+    #[tokio::test]
+    async fn test_ayaneo_generic_wildcard_match() {
+        let _h = setup_board(
+            "AYANEO\n",
+            "AIR Plus\n",
+            "AYANEO 2\n"
+        ).await.unwrap();
+
+        // Test AYANEO device matching via wildcard in generic.toml
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match AYANEO generic config from generic.toml
+        assert_eq!(device, "ayaneo_generic");
+        assert_eq!(variant, "AYANEO_Generic");
+    }
+
+    #[tokio::test]
+    async fn test_ayaneo_kun_wildcard_match() {
+        let _h = setup_board(
+            "AYANEO\n",
+            "KUN\n",
+            "AYANEO KUN\n"
+        ).await.unwrap();
+
+        // Test another AYANEO device matching via wildcard in generic.toml
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match AYANEO generic config from generic.toml
+        assert_eq!(device, "ayaneo_generic");
+        assert_eq!(variant, "AYANEO_Generic");
+    }
+
+    #[tokio::test]
+    async fn test_unknown_vendor_fallback_to_generic() {
+        let _h = setup_board(
+            "Some Random Vendor\n",
+            "Random Board\n",
+            "Random Product\n"
+        ).await.unwrap();
+
+        // Test completely unknown vendor falling back to generic wildcard match
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match the final generic fallback config from generic.toml
+        assert_eq!(device, "generic");
+        assert_eq!(variant, "Generic");
+    }
+
+    #[tokio::test]
+    async fn test_empty_vendor_fallback_to_generic() {
+        let _h = setup_board(
+            "\n",
+            "Empty Board\n",
+            "Empty Product\n"
+        ).await.unwrap();
+
+        // Test empty vendor falling back to generic wildcard match
+        let (device, variant) = device_variant().await.unwrap();
+        
+        // Should match the final generic fallback config from generic.toml
         assert_eq!(device, "generic");
         assert_eq!(variant, "Generic");
     }
