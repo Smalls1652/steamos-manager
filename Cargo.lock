@@ -1137,6 +1137,7 @@ dependencies = [
  "clap",
  "config",
  "gio",
+ "glob",
  "inotify",
  "input-linux",
  "itertools 0.14.0",
