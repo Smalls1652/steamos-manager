@@ -24,6 +24,3 @@ performance_profile = "balanced-performance"
 
 [battery_charge_limit]
 method = "acpi_sb"
-
-[inputplumber]
-target_devices = ["deck-uhid", "keyboard", "mouse"]
