@@ -77,19 +77,21 @@ struct ConfigPaths {
 
 impl ConfigPaths {
     async fn resolve() -> Result<ConfigPaths> {
+        let sddm_conf = session_config().await.sddm;
+
         // We determine whether we are defaulting to the "holo" or "steamos" naming convention
         // based on the name of the config file in CONFIG_PREFIX_USR.
-        if try_exists(path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH_LEGACY)).await? {
+        if try_exists(path(CONFIG_PREFIX_USR).join(&sddm_conf.legacy_session_check_path)).await? {
             Ok(ConfigPaths {
-                check: path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH_LEGACY),
-                default_config: path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY),
-                default_temp_config: path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY),
+                check: path(CONFIG_PREFIX_USR).join(&sddm_conf.legacy_session_check_path),
+                default_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_config_path),
+                default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_temp_config_path),
             })
         } else {
             Ok(ConfigPaths {
-                check: path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH),
-                default_config: path(CONFIG_PREFIX).join(CONFIG_PATH),
-                default_temp_config: path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH),
+                check: path(CONFIG_PREFIX_USR).join(&sddm_conf.session_check_path),
+                default_config: path(CONFIG_PREFIX).join(&sddm_conf.config_path),
+                default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.temp_config_path),
             })
         }
     }

@@ -34,7 +34,7 @@ pub(crate) struct SessionConfig {
     pub gamescope_session_service: String,
     pub gamescope_session_desktop: String,
     pub desktop: String,
-    pub ssdm: Option<SddmConfig>
+    pub sddm: SddmConfig
 }
 
 impl Default for SessionConfig {
@@ -43,7 +43,7 @@ impl Default for SessionConfig {
             gamescope_session_service: String::from("gamescope-session-plus@ogui-steam.service"),
             gamescope_session_desktop: String::from("gamescope-session-ogui-steam.desktop"),
             desktop: String::from("plasma.desktop"),
-            ssdm: None
+            sddm: SddmConfig::default()
         }
     }
 }
