@@ -45,6 +45,30 @@ const TEMPORARY_CONFIG_PATH: &str = "zzt-holo-temp-login.conf";
 #[cfg(not(test))]
 static CONFIG_PATHS: OnceCell<ConfigPaths> = OnceCell::const_new();
 
+#[derive(Clone, Deserialize, Debug)]
+#[serde(default)]
+pub(crate) struct SddmConfig {
+    pub session_check_path: String,
+    pub config_path: String,
+    pub temp_config_path: String,
+    pub legacy_session_check_path: String,
+    pub legacy_config_path: String,
+    pub legacy_temp_config_path: String,
+}
+
+impl Default for SddmConfig {
+    fn default() -> Self {
+        SddmConfig {
+            session_check_path: String::from(SESSION_CHECK_PATH),
+            config_path: String::from(CONFIG_PATH),
+            temp_config_path: String::from(TEMPORARY_CONFIG_PATH),
+            legacy_session_check_path: String::from(SESSION_CHECK_PATH_LEGACY),
+            legacy_config_path: String::from(CONFIG_PATH_LEGACY),
+            legacy_temp_config_path: String::from(TEMPORARY_CONFIG_PATH_LEGACY)
+        }
+    }
+}
+
 struct ConfigPaths {
     check: PathBuf,
     default_config: PathBuf,
