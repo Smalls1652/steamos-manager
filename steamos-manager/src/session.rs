@@ -48,6 +48,7 @@ static CONFIG_PATHS: OnceCell<ConfigPaths> = OnceCell::const_new();
 #[derive(Clone, Deserialize, Debug)]
 #[serde(default)]
 pub(crate) struct SddmConfig {
+    pub enable_user_login: bool,
     pub session_check_path: String,
     pub config_path: String,
     pub temp_config_path: String,
@@ -59,6 +60,7 @@ pub(crate) struct SddmConfig {
 impl Default for SddmConfig {
     fn default() -> Self {
         SddmConfig {
+            enable_user_login: false,
             session_check_path: String::from(SESSION_CHECK_PATH),
             config_path: String::from(CONFIG_PATH),
             temp_config_path: String::from(TEMPORARY_CONFIG_PATH),
@@ -73,6 +75,8 @@ struct ConfigPaths {
     check: PathBuf,
     default_config: PathBuf,
     default_temp_config: PathBuf,
+
+    sddm_conf: SddmConfig
 }
 
 impl ConfigPaths {
@@ -86,12 +90,14 @@ impl ConfigPaths {
                 check: path(CONFIG_PREFIX_USR).join(&sddm_conf.legacy_session_check_path),
                 default_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_config_path),
                 default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_temp_config_path),
+                sddm_conf
             })
         } else {
             Ok(ConfigPaths {
                 check: path(CONFIG_PREFIX_USR).join(&sddm_conf.session_check_path),
                 default_config: path(CONFIG_PREFIX).join(&sddm_conf.config_path),
                 default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.temp_config_path),
+                sddm_conf
             })
         }
     }
@@ -99,7 +105,7 @@ impl ConfigPaths {
     // Check for the existence of the legacy naming convention file before using the new naming as
     // these will take precedence when sddm parses the config files.
     async fn config(&self) -> Result<PathBuf> {
-        let legacy = path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY);
+        let legacy = path(CONFIG_PREFIX).join(&self.sddm_conf.legacy_config_path);
         if try_exists(&legacy).await? {
             return Ok(legacy);
         }
@@ -108,7 +114,7 @@ impl ConfigPaths {
     }
 
     async fn temp_config(&self) -> Result<PathBuf> {
-        let legacy = path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY);
+        let legacy = path(CONFIG_PREFIX).join(&self.sddm_conf.legacy_temp_config_path);
         if try_exists(&legacy).await? {
             return Ok(legacy);
         }
@@ -125,6 +131,30 @@ async fn get_config_paths() -> Result<ConfigPaths> {
 #[cfg(not(test))]
 async fn get_config_paths() -> Result<&'static ConfigPaths> {
     CONFIG_PATHS.get_or_try_init(ConfigPaths::resolve).await
+}
+
+#[cfg(test)]
+async fn resolve_user_id(_uid: u32) -> Result<String> {
+    Ok("deck".to_string())
+}
+
+#[cfg(not(test))]
+async fn resolve_user_id(uid: u32) -> Result<String> {
+    let id_proc = tokio::process::Command::new("id")
+        .args(&["--name", "--user", &uid.to_string()])
+        .output()
+        .await?;
+
+    if !id_proc.status.success() {
+        let error_output = match String::from_utf8(id_proc.stderr) {
+            Ok(value) => value,
+            Err(error) => format!("Failed to convert error output: {:?}", error)
+        };
+
+        return Err(anyhow::anyhow!("Could not resolve user ID {}: {}", uid, error_output));
+    }
+
+    Ok(String::from_utf8(id_proc.stdout)?)
 }
 
 #[derive(Default, Deserialize, Serialize, Display, EnumString, PartialEq, Debug, Copy, Clone)]
@@ -399,8 +429,9 @@ pub(crate) mod root {
     use tokio::fs::{create_dir_all, remove_file, write};
 
     use crate::path;
-    use crate::session::{
-        CONFIG_PREFIX, TEMPORARY_CONFIG_PATH, TEMPORARY_CONFIG_PATH_LEGACY, get_config_paths,
+    use crate::platform::session_config;
+use crate::session::{
+        CONFIG_PREFIX, TEMPORARY_CONFIG_PATH, TEMPORARY_CONFIG_PATH_LEGACY, get_config_paths, resolve_user_id,
     };
 
     pub(crate) async fn clean_temporary_sessions() -> Result<()> {
@@ -425,11 +456,22 @@ pub(crate) mod root {
             !session.contains('\n'),
             "Session name cannot contain newlines"
         );
+        let sddm_config = session_config().await.sddm;
+
+        let temp_session_content = match sddm_config.enable_user_login {
+            false => format!("[Autologin]\nSession={session}\n"),
+            true => {
+                let user = resolve_user_id(1000).await?;
+
+                format!("[Autologin]\nSession={session}\nUser={user}")
+            }
+        };
+
         let paths = get_config_paths().await?;
         create_dir_all(path(CONFIG_PREFIX)).await?;
         Ok(write(
             paths.temp_config().await?,
-            format!("[Autologin]\nSession={session}\n").as_bytes(),
+            temp_session_content.as_bytes(),
         )
         .await?)
     }
@@ -439,11 +481,22 @@ pub(crate) mod root {
             !session.contains('\n'),
             "Session name cannot contain newlines"
         );
+        let sddm_config = session_config().await.sddm;
+
+        let default_session_content = match sddm_config.enable_user_login {
+            false => format!("[Autologin]\nSession={session}\n"),
+            true => {
+                let user = resolve_user_id(1000).await?;
+
+                format!("[Autologin]\nSession={session}\nUser={user}")
+            }
+        };
+
         let paths = get_config_paths().await?;
         create_dir_all(path(CONFIG_PREFIX)).await?;
         Ok(write(
             paths.config().await?,
-            format!("[Autologin]\nSession={session}\n").as_bytes(),
+            default_session_content.as_bytes(),
         )
         .await?)
     }
@@ -1025,4 +1078,43 @@ mod test {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_sddm_config_simple() {
+        let _handle = testing::start();
+
+        let sddm_config = SddmConfig {
+            config_path: "zz-custom-autologin.conf".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(sddm_config.config_path, "zz-custom-autologin.conf");
+        assert_eq!(sddm_config.temp_config_path, TEMPORARY_CONFIG_PATH);
+    }
+
+    #[tokio::test]
+    async fn test_sddm_config_toml() {
+        let _handle = testing::start();
+
+        let sddm_config = toml::from_str::<SddmConfig>(r#"
+        config_path = "zz-custom-autologin.conf"
+        "#).unwrap();
+
+        assert_eq!(sddm_config.config_path, "zz-custom-autologin.conf");
+        assert_eq!(sddm_config.temp_config_path, TEMPORARY_CONFIG_PATH);
+    }
+
+    // #[tokio::test]
+    // async fn test_default_sddm_config_from_platform_config() {
+    //     let _handle = testing::start();
+
+    //     let platform_config = platform_config().await
+    //         .expect("Failed to get platform config")
+    //         .expect("Platform config was null");
+
+    //     let session_config = platform_config.session.expect("Session config should not be null");
+
+    //     assert_eq!(session_config.ssdm.config_path, "zz-custom-autologin.conf");
+    //     assert_eq!(sddm_config.temp_config_path, TEMPORARY_CONFIG_PATH);
+    // }
 }
