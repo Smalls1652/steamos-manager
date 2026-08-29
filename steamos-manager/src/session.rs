@@ -42,6 +42,8 @@ const SESSION_CHECK_PATH: &str = "holo.conf";
 const CONFIG_PATH: &str = "zz-holo-autologin.conf";
 const TEMPORARY_CONFIG_PATH: &str = "zzt-holo-temp-login.conf";
 
+const USER_AUTOLOGIN_PATH: &str = "zy-user-autologin.conf";
+
 #[cfg(not(test))]
 static CONFIG_PATHS: OnceCell<ConfigPaths> = OnceCell::const_new();
 
