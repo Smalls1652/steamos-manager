@@ -33,7 +33,7 @@ pub(crate) struct SessionConfig {
     pub gamescope_session_service: String,
     pub gamescope_session_desktop: String,
     pub desktop: String,
-    pub enable_user_autologin: bool,
+    pub user_autologin: UserAutologinConfig,
 }
 
 impl Default for SessionConfig {
@@ -42,7 +42,23 @@ impl Default for SessionConfig {
             gamescope_session_service: String::from("gamescope-session-plus@ogui-steam.service"),
             gamescope_session_desktop: String::from("gamescope-session-ogui-steam.desktop"),
             desktop: String::from("plasma.desktop"),
-            enable_user_autologin: false,
+            user_autologin: UserAutologinConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Debug)]
+#[serde(default)]
+pub(crate) struct UserAutologinConfig {
+    pub enable: bool,
+    pub user_id: u32
+}
+
+impl Default for UserAutologinConfig {
+    fn default() -> Self {
+        UserAutologinConfig { 
+            enable: false,
+            user_id: 1000
         }
     }
 }
