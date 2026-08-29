@@ -42,8 +42,6 @@ const SESSION_CHECK_PATH: &str = "holo.conf";
 const CONFIG_PATH: &str = "zz-holo-autologin.conf";
 const TEMPORARY_CONFIG_PATH: &str = "zzt-holo-temp-login.conf";
 
-const USER_AUTOLOGIN_PATH: &str = "zy-user-autologin.conf";
-
 #[cfg(not(test))]
 static CONFIG_PATHS: OnceCell<ConfigPaths> = OnceCell::const_new();
 
@@ -370,12 +368,14 @@ impl SessionManager {
 }
 
 pub(crate) mod root {
-    use anyhow::{Result, ensure};
+    use anyhow::{Result, anyhow, ensure};
+use nix::unistd::{Uid, User};
     use std::io::ErrorKind;
     use tokio::fs::{create_dir_all, remove_file, write};
 
     use crate::path;
-    use crate::session::{
+    use crate::platform::session_config;
+use crate::session::{
         CONFIG_PREFIX, TEMPORARY_CONFIG_PATH, TEMPORARY_CONFIG_PATH_LEGACY, get_config_paths,
     };
 
@@ -402,10 +402,22 @@ pub(crate) mod root {
             "Session name cannot contain newlines"
         );
         let paths = get_config_paths().await?;
+        let session_config = session_config().await;
+
         create_dir_all(path(CONFIG_PREFIX)).await?;
+
+        let mut sddm_conf_builder = SddmAutologinBuilder::new(session);
+
+        if session_config.user_autologin.enable {
+            sddm_conf_builder.with_user(&session_config.user_autologin.user_id);
+        }
+
+        let sddm_conf = sddm_conf_builder.build()?;
+        let sddm_conf = sddm_conf.trim_end();
+
         Ok(write(
             paths.temp_config().await?,
-            format!("[Autologin]\nSession={session}\n").as_bytes(),
+            sddm_conf.as_bytes(),
         )
         .await?)
     }
@@ -416,12 +428,89 @@ pub(crate) mod root {
             "Session name cannot contain newlines"
         );
         let paths = get_config_paths().await?;
+        let session_config = session_config().await;
+
         create_dir_all(path(CONFIG_PREFIX)).await?;
+
+        let mut sddm_conf_builder = SddmAutologinBuilder::new(session);
+
+        if session_config.user_autologin.enable {
+            sddm_conf_builder.with_user(&session_config.user_autologin.user_id);
+        }
+
+        let sddm_conf = sddm_conf_builder.build()?;
+        let sddm_conf = sddm_conf.trim_end();
+
         Ok(write(
             paths.config().await?,
-            format!("[Autologin]\nSession={session}\n").as_bytes(),
+            sddm_conf.as_bytes(),
         )
         .await?)
+    }
+
+    /// Helper for building `sddm` auto-login config files.
+    pub struct SddmAutologinBuilder {
+        session: String,
+        uid: Option<u32>
+    }
+
+    impl SddmAutologinBuilder {
+        /// Create a new [`SddmAutologinBuilder`].
+        /// 
+        /// ## Arguments
+        /// 
+        /// * `session` - The session used for auto-login.
+        pub fn new(session: &str) -> Self {
+            Self {
+                session: session.to_owned(),
+                uid: None
+            }
+        }
+
+        /// Add a user UID.
+        /// 
+        /// ## Arguments
+        /// 
+        /// * `uid` - The UID of the user.
+        pub fn with_user(&mut self, uid: &u32) -> &mut Self {
+            self.uid = Some(uid.to_owned());
+            self
+        }
+
+        /// Resolve the name of a user from the UID.
+        fn resolve_uid(&self) -> Result<User> {
+            let uid_value = match &self.uid {
+                Some(value) => value,
+                None => return Err(anyhow!("uid value is null. this should not have happened.")),
+            };
+
+            let uid = Uid::from_raw(*uid_value);
+
+            let user = User::from_uid(uid)?;
+            let user = match user {
+                Some(value) => value,
+                None => return Err(anyhow!("failed to resolve uid: {}", uid_value))
+            };
+
+            Ok(user)
+        }
+
+        /// Build the string for the `sddm` config file.
+        pub fn build(&mut self) -> Result<String> {
+            let mut sddm_conf = String::new();
+
+            // Add the session.
+            sddm_conf.push_str("[Autologin]\n");
+            sddm_conf.push_str(format!("Session={session}\n", session=self.session).as_str());
+
+            // Add the user, if configured.
+            if self.uid.is_some() {
+                let resolved_user = self.resolve_uid()?;
+                sddm_conf.push_str(format!("User={username}\n", username=resolved_user.name).as_str());
+            }
+
+            Ok(sddm_conf)
+        }
     }
 }
 
@@ -497,7 +586,8 @@ impl Service for SessionManagerService {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::systemd::test::{MockManager, MockUnit};
+    use crate::session::root::SddmAutologinBuilder;
+use crate::systemd::test::{MockManager, MockUnit};
     use crate::testing;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1000,5 +1090,34 @@ mod test {
                 path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_session_autologin_disabled() {
+        let _handle = testing::start();
+
+        let sddm_conf = SddmAutologinBuilder::new("gamescope-session-ogui-steam.desktop")
+            .build()
+            .unwrap();
+        let sddm_conf = sddm_conf.trim_end();
+
+        assert_eq!(sddm_conf, "[Autologin]\nSession=gamescope-session-ogui-steam.desktop")
+    }
+
+    #[tokio::test]
+    async fn test_session_autologin_enabled() {
+        let _handle = testing::start();
+
+        // Is this the best way to do this in a test?
+        let user = nix::unistd::User::from_uid(1000.into()).unwrap().unwrap();
+        let expected_sddm_conf = format!("[Autologin]\nSession=gamescope-session-ogui-steam.desktop\nUser={}", user.name);
+
+        let sddm_conf = SddmAutologinBuilder::new("gamescope-session-ogui-steam.desktop")
+            .with_user(&1000)
+            .build()
+            .unwrap();
+        let sddm_conf = sddm_conf.trim_end();
+
+        assert_eq!(sddm_conf, expected_sddm_conf)
     }
 }
