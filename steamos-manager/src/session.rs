@@ -408,8 +408,8 @@ use crate::session::{
 
         let mut sddm_conf_builder = SddmAutologinBuilder::new(session);
 
-        if session_config.user_autologin.enable {
-            sddm_conf_builder.with_user(&session_config.user_autologin.user_id);
+        if session_config.auto_login.enable {
+            sddm_conf_builder.with_user(&session_config.auto_login.user_id);
         }
 
         let sddm_conf = sddm_conf_builder.build()?;
@@ -434,8 +434,8 @@ use crate::session::{
 
         let mut sddm_conf_builder = SddmAutologinBuilder::new(session);
 
-        if session_config.user_autologin.enable {
-            sddm_conf_builder.with_user(&session_config.user_autologin.user_id);
+        if session_config.auto_login.enable {
+            sddm_conf_builder.with_user(&session_config.auto_login.user_id);
         }
 
         let sddm_conf = sddm_conf_builder.build()?;

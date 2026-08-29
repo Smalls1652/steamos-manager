@@ -33,7 +33,7 @@ pub(crate) struct SessionConfig {
     pub gamescope_session_service: String,
     pub gamescope_session_desktop: String,
     pub desktop: String,
-    pub user_autologin: UserAutologinConfig,
+    pub auto_login: UserAutologinConfig,
 }
 
 impl Default for SessionConfig {
@@ -42,7 +42,7 @@ impl Default for SessionConfig {
             gamescope_session_service: String::from("gamescope-session-plus@ogui-steam.service"),
             gamescope_session_desktop: String::from("gamescope-session-ogui-steam.desktop"),
             desktop: String::from("plasma.desktop"),
-            user_autologin: UserAutologinConfig::default(),
+            auto_login: UserAutologinConfig::default(),
         }
     }
 }
