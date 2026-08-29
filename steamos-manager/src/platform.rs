@@ -22,7 +22,7 @@ use zbus::Connection;
 
 #[cfg(test)]
 use crate::path;
-use crate::session::SddmConfig;
+use crate::session::DisplayManagerConfig;
 use crate::systemd::SystemdUnit;
 
 #[cfg(not(test))]
@@ -34,7 +34,7 @@ pub(crate) struct SessionConfig {
     pub gamescope_session_service: String,
     pub gamescope_session_desktop: String,
     pub desktop: String,
-    pub sddm: SddmConfig
+    pub display_manager: DisplayManagerConfig
 }
 
 impl Default for SessionConfig {
@@ -43,7 +43,7 @@ impl Default for SessionConfig {
             gamescope_session_service: String::from("gamescope-session-plus@ogui-steam.service"),
             gamescope_session_desktop: String::from("gamescope-session-ogui-steam.desktop"),
             desktop: String::from("plasma.desktop"),
-            sddm: SddmConfig::default()
+            display_manager: DisplayManagerConfig::default()
         }
     }
 }
@@ -212,11 +212,33 @@ impl FormatDeviceConfig {
 impl PlatformConfig {
     #[cfg(not(test))]
     async fn load() -> Result<Option<PlatformConfig>> {
-        let path = "/usr/share/steamos-manager/platform.toml";
-        let config = read_to_string(path)
-            .await
-            .with_context(|| format!("Failed to read {path}"))?;
-        Ok(Some(toml::from_str(config.as_ref())?))
+        let paths = vec![
+            PathBuf::from("/etc/steamos-manager/platform.toml"),
+            PathBuf::from("/usr/share/steamos-manager/platform.toml"),
+        ];
+
+        let mut config = None;
+
+        for path in paths {
+            tracing::info!("Attempting to load platform config: {:#?}", &path);
+
+            if !path.exists() {
+                continue;
+            }
+
+            config = Some(read_to_string(&path)
+                .await
+                .with_context(|| format!("Failed to read {:#?}", &path))?);
+
+            tracing::info!("Loaded config from: {:#?}", &path);
+
+            break;
+        }
+
+        match config {
+            Some(value) => Ok(Some(toml::from_str(value.as_ref())?)),
+            None => Ok(Some(PlatformConfig::default()))
+        }
     }
 
     #[cfg(test)]

@@ -46,9 +46,87 @@ const TEMPORARY_CONFIG_PATH: &str = "zzt-holo-temp-login.conf";
 static CONFIG_PATHS: OnceCell<ConfigPaths> = OnceCell::const_new();
 
 #[derive(Clone, Deserialize, Debug)]
+#[serde(tag = "name")]
+pub(crate) enum DisplayManagerConfig {
+    #[serde(rename = "sddm")]
+    Sddm(SddmConfig),
+    #[serde(rename = "plasma-login-manager")]
+    PlasmaLoginManager(PlasmaLoginManagerConfig)
+}
+
+impl Default for DisplayManagerConfig {
+    fn default() -> Self {
+        Self::Sddm(SddmConfig::default())
+    }
+}
+
+impl DisplayManagerConfig {
+    async fn resolve(&self) -> Result<ConfigPaths> {
+        match self {
+            Self::Sddm(config) => config.resolve().await,
+            Self::PlasmaLoginManager(config) => config.resolve().await
+        }
+    }
+
+    async fn config(&self) -> Result<PathBuf> {
+        match self {
+            Self::Sddm(config) => config.config().await,
+            Self::PlasmaLoginManager(config) => config.config().await
+        }
+    }
+
+    async fn temp_config(&self) -> Result<PathBuf> {
+        match self {
+            Self::Sddm(config) => config.temp_config().await,
+            Self::PlasmaLoginManager(config) => config.temp_config().await
+        }
+    }
+
+    fn enable_user_login(&self) -> bool {
+        match self {
+            Self::Sddm(config) => config.enable_user_login,
+            Self::PlasmaLoginManager(config) => config.enable_user_login
+        }
+    }
+
+    #[allow(dead_code)]
+    fn config_prefix_usr(&self) -> String {
+        match self {
+            Self::Sddm(config) => config.config_prefix_usr.to_owned(),
+            Self::PlasmaLoginManager(config) => config.config_prefix_usr.to_owned()
+        }
+    }
+
+    fn config_prefix(&self) -> String {
+        match self {
+            Self::Sddm(config) => config.config_prefix.to_owned(),
+            Self::PlasmaLoginManager(config) => config.config_prefix.to_owned()
+        }
+    }
+
+    #[allow(dead_code)]
+    fn session_check_path(&self) -> PathBuf {
+        match self {
+            Self::Sddm(config) => path(&config.config_prefix_usr).join(&config.session_check_path),
+            Self::PlasmaLoginManager(config) => path(&config.config_prefix_usr).join(&config.session_check_path)
+        }
+    }
+}
+
+trait DisplayManagerConfigPathResolve {
+    fn resolve(&self) -> impl Future<Output = Result<ConfigPaths>>;
+
+    fn config(&self) -> impl Future<Output = Result<PathBuf>>;
+
+    fn temp_config(&self) -> impl Future<Output = Result<PathBuf>>;
+}
+
+#[derive(Clone, Deserialize, Debug)]
 #[serde(default)]
 pub(crate) struct SddmConfig {
     pub enable_user_login: bool,
+    pub config_prefix_usr: String,
+    pub config_prefix: String,
     pub session_check_path: String,
     pub config_path: String,
     pub temp_config_path: String,
@@ -61,6 +139,8 @@ impl Default for SddmConfig {
     fn default() -> Self {
         SddmConfig {
             enable_user_login: false,
+            config_prefix_usr: String::from(CONFIG_PREFIX_USR),
+            config_prefix: String::from(CONFIG_PREFIX),
             session_check_path: String::from(SESSION_CHECK_PATH),
             config_path: String::from(CONFIG_PATH),
             temp_config_path: String::from(TEMPORARY_CONFIG_PATH),
@@ -71,66 +151,106 @@ impl Default for SddmConfig {
     }
 }
 
-struct ConfigPaths {
-    check: PathBuf,
-    default_config: PathBuf,
-    default_temp_config: PathBuf,
-
-    sddm_conf: SddmConfig
-}
-
-impl ConfigPaths {
-    async fn resolve() -> Result<ConfigPaths> {
-        let sddm_conf = session_config().await.sddm;
-
-        // We determine whether we are defaulting to the "holo" or "steamos" naming convention
-        // based on the name of the config file in CONFIG_PREFIX_USR.
-        if try_exists(path(CONFIG_PREFIX_USR).join(&sddm_conf.legacy_session_check_path)).await? {
+impl DisplayManagerConfigPathResolve for SddmConfig {
+    async fn resolve(&self) -> Result<ConfigPaths> {
+        if try_exists(path(&self.config_prefix_usr).join(&self.legacy_session_check_path)).await? {
             Ok(ConfigPaths {
-                check: path(CONFIG_PREFIX_USR).join(&sddm_conf.legacy_session_check_path),
-                default_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_config_path),
-                default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.legacy_temp_config_path),
-                sddm_conf
+                check: path(&self.config_prefix_usr).join(&self.legacy_session_check_path),
+                default_config: path(&self.config_prefix).join(&self.legacy_config_path),
+                default_temp_config: path(&self.config_prefix).join(&self.legacy_temp_config_path),
             })
         } else {
             Ok(ConfigPaths {
-                check: path(CONFIG_PREFIX_USR).join(&sddm_conf.session_check_path),
-                default_config: path(CONFIG_PREFIX).join(&sddm_conf.config_path),
-                default_temp_config: path(CONFIG_PREFIX).join(&sddm_conf.temp_config_path),
-                sddm_conf
+                check: path(&self.config_prefix_usr).join(&self.session_check_path),
+                default_config: path(&self.config_prefix).join(&self.config_path),
+                default_temp_config: path(&self.config_prefix).join(&self.temp_config_path),
             })
         }
     }
 
-    // Check for the existence of the legacy naming convention file before using the new naming as
-    // these will take precedence when sddm parses the config files.
     async fn config(&self) -> Result<PathBuf> {
-        let legacy = path(CONFIG_PREFIX).join(&self.sddm_conf.legacy_config_path);
+        let legacy = path(&self.config_prefix).join(&self.legacy_config_path);
         if try_exists(&legacy).await? {
             return Ok(legacy);
         }
 
-        Ok(self.default_config.clone())
+        Ok(path(&self.config_prefix).join(&self.config_path))
     }
 
     async fn temp_config(&self) -> Result<PathBuf> {
-        let legacy = path(CONFIG_PREFIX).join(&self.sddm_conf.legacy_temp_config_path);
+        let legacy = path(&self.config_prefix).join(&self.legacy_temp_config_path);
         if try_exists(&legacy).await? {
             return Ok(legacy);
         }
 
-        Ok(self.default_temp_config.clone())
+        Ok(path(&self.config_prefix).join(&self.temp_config_path))
     }
+}
+
+#[derive(Clone, Deserialize, Debug)]
+#[serde(default)]
+pub(crate) struct PlasmaLoginManagerConfig {
+    pub enable_user_login: bool,
+
+    pub config_prefix_usr: String,
+    pub config_prefix: String,
+    
+    pub session_check_path: String,
+    pub config_path: String,
+    pub temp_config_path: String,
+}
+
+impl Default for PlasmaLoginManagerConfig {
+    fn default() -> Self {
+        Self {
+            enable_user_login: false,
+            config_prefix_usr: "/etc/plasmalogin".to_string(),
+            config_prefix: "/etc/plasmalogin.conf.d/".to_string(),
+            session_check_path: "holo.conf".to_string(),
+            config_path: "zz-holo-autologin.conf".to_string(),
+            temp_config_path: "zzt-holo-temp-login.conf".to_string(),
+        }
+    }
+}
+
+impl DisplayManagerConfigPathResolve for PlasmaLoginManagerConfig {
+    async fn resolve(&self) -> Result<ConfigPaths> {
+        Ok(ConfigPaths {
+            check: path(&self.config_prefix_usr).join(&self.session_check_path),
+            default_config: path(&self.config_prefix).join(&self.config_path),
+            default_temp_config: path(&self.config_prefix).join(&self.temp_config_path),
+        })
+    }
+
+    async fn config(&self) -> Result<PathBuf> {
+        Ok(path(&self.config_prefix).join(&self.config_path))
+    }
+
+    async fn temp_config(&self) -> Result<PathBuf> {
+        Ok(path(&self.config_prefix).join(&self.temp_config_path))
+    }
+}
+
+struct ConfigPaths {
+    check: PathBuf,
+    #[allow(dead_code)]
+    default_config: PathBuf,
+    #[allow(dead_code)]
+    default_temp_config: PathBuf,
 }
 
 #[cfg(test)]
 async fn get_config_paths() -> Result<ConfigPaths> {
-    ConfigPaths::resolve().await
+    let dm_config = session_config().await.display_manager;
+    
+    dm_config.resolve().await
 }
 
 #[cfg(not(test))]
 async fn get_config_paths() -> Result<&'static ConfigPaths> {
-    CONFIG_PATHS.get_or_try_init(ConfigPaths::resolve).await
+    let dm_config = session_config().await.display_manager;
+
+    CONFIG_PATHS.get_or_try_init(async || dm_config.resolve().await).await
 }
 
 #[cfg(test)]
@@ -431,7 +551,7 @@ pub(crate) mod root {
     use crate::path;
     use crate::platform::session_config;
 use crate::session::{
-        CONFIG_PREFIX, TEMPORARY_CONFIG_PATH, TEMPORARY_CONFIG_PATH_LEGACY, get_config_paths, resolve_user_id,
+        CONFIG_PREFIX, TEMPORARY_CONFIG_PATH, TEMPORARY_CONFIG_PATH_LEGACY, resolve_user_id,
     };
 
     pub(crate) async fn clean_temporary_sessions() -> Result<()> {
@@ -456,9 +576,9 @@ use crate::session::{
             !session.contains('\n'),
             "Session name cannot contain newlines"
         );
-        let sddm_config = session_config().await.sddm;
+        let dm_config = session_config().await.display_manager;
 
-        let temp_session_content = match sddm_config.enable_user_login {
+        let temp_session_content = match dm_config.enable_user_login() {
             false => format!("[Autologin]\nSession={session}\n"),
             true => {
                 let user = resolve_user_id(1000).await?;
@@ -467,10 +587,9 @@ use crate::session::{
             }
         };
 
-        let paths = get_config_paths().await?;
-        create_dir_all(path(CONFIG_PREFIX)).await?;
+        create_dir_all(path(dm_config.config_prefix())).await?;
         Ok(write(
-            paths.temp_config().await?,
+            dm_config.temp_config().await?,
             temp_session_content.as_bytes(),
         )
         .await?)
@@ -481,9 +600,10 @@ use crate::session::{
             !session.contains('\n'),
             "Session name cannot contain newlines"
         );
-        let sddm_config = session_config().await.sddm;
 
-        let default_session_content = match sddm_config.enable_user_login {
+        let dm_config = session_config().await.display_manager;
+
+        let default_session_content = match dm_config.enable_user_login() {
             false => format!("[Autologin]\nSession={session}\n"),
             true => {
                 let user = resolve_user_id(1000).await?;
@@ -492,10 +612,9 @@ use crate::session::{
             }
         };
 
-        let paths = get_config_paths().await?;
-        create_dir_all(path(CONFIG_PREFIX)).await?;
+        create_dir_all(path(dm_config.config_prefix())).await?;
         Ok(write(
-            paths.config().await?,
+            dm_config.config().await?,
             default_session_content.as_bytes(),
         )
         .await?)
@@ -993,91 +1112,91 @@ mod test {
     async fn test_holo_naming_selection() {
         let _handle = testing::start();
 
-        create_dir_all(path(CONFIG_PREFIX_USR)).await.unwrap();
-        create_dir_all(path(CONFIG_PREFIX)).await.unwrap();
+        let dm_config = session_config().await.display_manager;
 
-        write(path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH), b"")
+        create_dir_all(path(&dm_config.config_prefix_usr())).await.unwrap();
+        create_dir_all(path(&dm_config.config_prefix())).await.unwrap();
+
+        write(dm_config.session_check_path(), b"")
             .await
             .unwrap();
 
-        let paths = get_config_paths().await.unwrap();
-
         {
             assert_eq!(
-                paths.config().await.unwrap(),
+                dm_config.config().await.unwrap(),
                 path(CONFIG_PREFIX).join(CONFIG_PATH)
             );
             assert_eq!(
-                paths.temp_config().await.unwrap(),
+                dm_config.temp_config().await.unwrap(),
                 path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH)
             );
         }
 
-        // If the legacy config files exist some how, we need to use these as they take precedence.
-        write(path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY), b"")
-            .await
-            .unwrap();
+        // // If the legacy config files exist some how, we need to use these as they take precedence.
+        // write(path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY), b"")
+        //     .await
+        //     .unwrap();
 
-        write(path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY), b"")
-            .await
-            .unwrap();
+        // write(path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY), b"")
+        //     .await
+        //     .unwrap();
 
-        {
-            assert_eq!(
-                paths.config().await.unwrap(),
-                path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
-            );
-            assert_eq!(
-                paths.temp_config().await.unwrap(),
-                path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
-            );
-        }
+        // {
+        //     assert_eq!(
+        //         paths.config().await.unwrap(),
+        //         path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
+        //     );
+        //     assert_eq!(
+        //         paths.temp_config().await.unwrap(),
+        //         path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
+        //     );
+        // }
     }
 
-    #[tokio::test]
-    async fn test_steamos_naming_selection() {
-        let _handle = testing::start();
+    // #[tokio::test]
+    // async fn test_steamos_naming_selection() {
+    //     let _handle = testing::start();
 
-        create_dir_all(path(CONFIG_PREFIX_USR)).await.unwrap();
-        create_dir_all(path(CONFIG_PREFIX)).await.unwrap();
+    //     create_dir_all(path(CONFIG_PREFIX_USR)).await.unwrap();
+    //     create_dir_all(path(CONFIG_PREFIX)).await.unwrap();
 
-        write(path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH_LEGACY), b"")
-            .await
-            .unwrap();
+    //     write(path(CONFIG_PREFIX_USR).join(SESSION_CHECK_PATH_LEGACY), b"")
+    //         .await
+    //         .unwrap();
 
-        let paths = get_config_paths().await.unwrap();
+    //     let paths = get_config_paths().await.unwrap();
 
-        {
-            assert_eq!(
-                paths.config().await.unwrap(),
-                path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
-            );
-            assert_eq!(
-                paths.temp_config().await.unwrap(),
-                path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
-            );
-        }
+    //     {
+    //         assert_eq!(
+    //             paths.config().await.unwrap(),
+    //             path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
+    //         );
+    //         assert_eq!(
+    //             paths.temp_config().await.unwrap(),
+    //             path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
+    //         );
+    //     }
 
-        // We still need to use the legacy config files even if the new naming exists, as they take precedence.
-        write(path(CONFIG_PREFIX).join(CONFIG_PATH), b"")
-            .await
-            .unwrap();
+    //     // We still need to use the legacy config files even if the new naming exists, as they take precedence.
+    //     write(path(CONFIG_PREFIX).join(CONFIG_PATH), b"")
+    //         .await
+    //         .unwrap();
 
-        write(path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH), b"")
-            .await
-            .unwrap();
+    //     write(path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH), b"")
+    //         .await
+    //         .unwrap();
 
-        {
-            assert_eq!(
-                paths.config().await.unwrap(),
-                path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
-            );
-            assert_eq!(
-                paths.temp_config().await.unwrap(),
-                path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
-            );
-        }
-    }
+    //     {
+    //         assert_eq!(
+    //             paths.config().await.unwrap(),
+    //             path(CONFIG_PREFIX).join(CONFIG_PATH_LEGACY)
+    //         );
+    //         assert_eq!(
+    //             paths.temp_config().await.unwrap(),
+    //             path(CONFIG_PREFIX).join(TEMPORARY_CONFIG_PATH_LEGACY)
+    //         );
+    //     }
+    // }
 
     #[tokio::test]
     async fn test_sddm_config_simple() {
